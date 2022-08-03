@@ -15,7 +15,7 @@ Link to paper: COMING SOON!
 
 Link to data: [GEO208795](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE208795)  
 
-License: MIT. See LICENCE.md file in directory which applies to all files. Just be aware that all socripts and data are provided without any warranty and the autors take no responsibility and/or liability for any claims.
+License: MIT. See LICENCE.md file in directory which applies to all files. Just be aware that all scripts and data are provided without any warranty and the autors take no responsibility and/or liability for any claims.
 
 ---
 
@@ -45,11 +45,15 @@ The data were processed using following steps, which can be splitted itno two pa
 1. Initial mapping to GRCm38 reference using Cell Ranger:  
 **cellranger count --id=Target_dir --feature-ref=FeatureReference.csv --libraries=Source_libs.csv --transcriptome=GRCm38_v102 --localcores=20** (this is for processing **GEX and csp data**; *Target_dir* will store the final results, *Source_libs.csv* contains the paths, sample prefixes towards samples and data type (either 'Gene Expression' or 'Feature Barcoding'). PBMCs from young and old mice need to be mapped separately, and GEX has 2 technical replicates, so in total there shoudl be three paths (for each of 2 GEX technical replicates and for csp). *FeatureReference.csv* defines csp barcodes.)
 2. Mapping to expanded mouse IMGT reference using Cell Ranger:  
-**cellranger vdj --id=Target_VDJ_dir --reference=IMGT_Mouse --fastqs=Fastqs --sample=sample_name --localcores=20** (for processing **V(D)J files**; *Fastqs* contains fastq files and *sample_name* is prefix of files in Fastqs directory for given sample. Again, young and old mice samples have to be mapped separately.)
+**cellranger vdj --id=Target_VDJ_dir --reference=IMGT_Mouse --fastqs=Fastqs --sample=sample_name --localcores=20** (for processing **V(D)J files**; *Target_VDJ_dir* will store the final results, *Fastqs* contains fastq files and *sample_name* is prefix of files in Fastqs directory for given sample. Again, young and old mice samples have to be mapped separately.)
 3. The feature barcoding counts are used to establish a limit for number of csp reads that was used to split the data used in the paper from an unrelated experiment. These scripts are uploaded in directory *part_1_1_Identify_cells* (each for each subset). 
-4. Extract reads from analyzed experiment using scripts contained in directory *part_1_2_Extract_reads*. This allows to account for reads with corrected cellular barcodes. There are two steps, preparation of .fastq and .bam (obtained by mapping) and extraction itself, which is little different for csp. **NOTE:** The available data have been already processed **up to this point**, these scripts are here merely for those interested.)
+4. Extract reads from analyzed experiment using scripts contained in directory *part_1_2_Extract_reads*. This allows to account for reads with corrected cellular barcodes. There are two steps, preparation of .fastq and .bam (obtained by mapping) and extraction itself, which is little different for csp. **NOTE:** The available data have been already processed **up to this point**, these scripts are here merely for those interested.
 5. Re-map resulting fastqs using respective commands for GEX+csp and V(D)J. The only difference is the fastq paths, otherwise commands from (1.) and (2.) are identical.
-6. Process GEX with MixCR to extract supplementary V(D)J. Details coming soon.
+6. Process GEX with MiXCR to extract supplementary V(D)J.  **Before running script that runs MiXCR you must configure it with paths to MiXCR and 10X bamtfastq software ** (look at the beginning of *main* function). Also it's better to copy .bam obtained by 10X and its index to different directory, because it will create new files. After that, run MiXCR with command *python Mixcr_pipeline_II.py source.bam result_dir*, where source.bam is copied bam along with its index. Result_dir then should contain directory mixcr where two .csv files should be present, one for TRA and TRB chains each. Create directory VDJ_GEX in directory where you'll run next step (7.) and copy them there. You need to run this script for both young and old B6 mice data, so in the end VDJ_GEX directory should contain 4 files that you should rename like this:  
+* * B6_Young_blood_TRA.csv
+* * B6_Young_blood_TRB.csv
+* * B6_Old_blood_TRA.csv
+* * B6_Old_blood_TRB.csv
 7. Prepare data using scripts contained in directory *part_1_3_Adjacent_sources*. The main script is named *part_1_3_Data_set_preparation.Rmd*, which runs everything needed. **Precision:** since filtering by limit on gene present in number of cells was done on combined data-set also containing cells from unrelated experiment, this filtering is not possible on the data without these cells. For this reason we provide a list of genes which have to be present in the final data. You can also follow the fitlering as usual; the results will be slightly different, but the final conclusion should be the same.  
 
 **Part 2**
@@ -61,7 +65,7 @@ This is the part where whole downstream analysis is performed. The required scri
 Contact:  
 
 Should you have any question, feel free to write to:  
-- veronika.niederlova@img.cas.cz
+- veronika.niederlova@img.cas.cz  
 - juraj.michalik@img.cas.cz  
 
 ---
