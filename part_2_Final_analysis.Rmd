@@ -1,0 +1,760 @@
+---
+title: "Analysis of CD8+ T cells profiled by scRNAseq"
+author: "Veronika Niederlova"
+date: "1.7.2022"
+output: rmdformats::material
+
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(include = TRUE, warning = FALSE, message = FALSE, error = TRUE, cache = TRUE)
+
+library("Matrix")
+library(Seurat)
+library(DT)
+library(dplyr)
+library(here)
+library(ggplot2)
+library(SingleCellExperiment)
+library(scater)
+library(mclust)
+library(kableExtra)
+library(cowplot)
+library(tidyverse)
+library(reshape)
+library(fgsea)
+library(SingleR)
+library(topGO)
+library(annotate)
+library("org.Mm.eg.db")
+library(biomaRt)
+library(ReactomePA)
+library(patchwork)
+
+convertHumanGeneList2 <- function(x){
+
+require("biomaRt")
+human = useMart("ensembl", dataset = "hsapiens_gene_ensembl", host = "https://dec2021.archive.ensembl.org/")
+mouse = useMart("ensembl", dataset = "mmusculus_gene_ensembl", host = "https://dec2021.archive.ensembl.org/")
+
+genesV2 = getLDS(attributes = c("hgnc_symbol"), filters = "hgnc_symbol", values = x , mart = human, attributesL = c("mgi_symbol"), martL = mouse, uniqueRows=T)
+
+humanx <- unique(genesV2[, 2])
+
+# Print the first 6 genes found to the screen
+print(head(humanx))
+return(humanx)
+}
+
+ggtheme <- function() {
+  theme(
+    axis.text = element_text(size = 10),
+    axis.title = element_text(size = 10),
+    text = element_text(size = 10, colour = "black"),
+    legend.text = element_text(size = 10),
+    legend.key.size =  unit(10, units = "points")
+    
+  )
+}
+
+
+```
+
+
+# Initial processing
+
+We start with datasets of sorted CD8+ T cells from blood of young or aged C57BL/6 mice that were profiled using the 10x Genomics Feature Barcode technology for Cell Surface Protein protocol (#CG000186 Rev D) with the Chromium Single Cell 5’ Library & Gel Bead and Chromium Single Cell 5' Feature Barcode Library kits (10x Genomics, #PN-1000014, #PN-1000020, #PN-1000080, #PN-1000009, #PN-1000084). Demultiplexing and initial quality control is described in [Part 1](https://github.com/Lab-of-Adaptive-Immunity/mouse-cd8-scRNAseq).
+
+
+In this document, we describe:
+
+- Additional quality control of the data
+- Integration of samples from young and aged mice
+- Normalization, scaling, variable feature selection, dimensional reduction
+- Differential expression testing
+- Generation of figures for the manuscript
+
+# Young mice
+
+## Loading and cleaning data from young mice
+
+The initial file `E02_BYB6_data_init.rds` was generated in [Part 1](https://github.com/Lab-of-Adaptive-Immunity/mouse-cd8-scRNAseq) and can be downloaded on Zenodo [link]. 
+
+```{r fig.width = 7.5, fig.height = 3}
+# Set path to dataset E02_BYB6_data_init.rds and load the data
+
+path <- "datav02/init/E02_BYB6_data_init.rds"
+seu <- readRDS(path)
+```
+
+We will filter out mitochondrial genes, genes encoding for ribosomal proteins, and genes encoding for TCR alpha and beta chains. 
+
+```{r fig.width = 7.5, fig.height = 3}
+# Remove mitochondrial, ribosomal, TRAV, TRBV and unannotated genes: blood young B6
+
+seu_counts <- seu[["RNA"]]@counts
+seu_counts_old <- seu[["RNA"]]@counts
+seu_annots <- seu@meta.data
+print(paste("Nrows before filtering genes:    ",nrow(seu)))
+
+seu_counts <- seu[!(grepl('Trav', rownames(seu)) |
+          grepl('Trbv', rownames(seu)) |
+          grepl('mt-', rownames(seu)) |
+            grepl('Rpl', rownames(seu)) |
+          grepl('Rps', rownames(seu)) |
+          grepl('MGP-', rownames(seu))),]
+
+print(paste("Nrows after filtering genes:    ",nrow(seu_counts)))
+
+# Create Seurat object with filtered genes
+
+seu <- CreateSeuratObject(counts = seu_counts[["RNA"]]@counts, project = "seu", min.cells = 3, min.features = 200, meta.data = seu_annots)
+
+# Process the blood young B6 dataset
+
+seu <- NormalizeData(object = seu)
+seu <- ScaleData(seu, verbose = FALSE)
+seu <- FindVariableFeatures(seu, selection.method = "vst", nfeatures = 1000)
+seu <- RunPCA(seu, npcs = 20, verbose = FALSE)
+seu <- RunUMAP(seu, reduction = "pca", dims = 1:20)
+seu <- FindNeighbors(seu, dims = 1:20)
+seu <- FindClusters(seu, resolution = 0.6)
+```
+
+### Predicting cell types using SingleR
+
+```{r fig.width = 7.5, fig.height = 3}
+# Annotate cell types using SingleR, version ‘1.0.1’
+# For installation of the SingleR package, use:
+# remotes::install_github("dviraran/SingleR", upgrade = "never")
+
+counts <- GetAssayData(seu[["RNA"]])
+seu_singler <- CreateSinglerObject(counts=counts,
+  project.name= "B6", # choose
+  min.genes = 200, # ignore cells with fewer than 200 transcripts
+  technology = "10x", # choose
+  species = "Mouse",
+  citation = "Paprckova et al. 2022", # choose
+  normalize.gene.length = FALSE,        # needed for full-length platforms (e.g. smartseq)
+  variable.genes = "de",  # see vignette
+  fine.tune = FALSE, # TRUE would take very long
+  reduce.file.size = TRUE, # leave out less-often used fields 
+  do.signatures = FALSE,
+  do.main.types = TRUE,
+  numCores = 4)
+
+## Summary of main cell types
+
+seu <- AddMetaData(seu,
+seu_singler$singler[[1]]$SingleR.single$labels,
+                                 col.name = "Immgen_annot_single")
+
+seu <- AddMetaData(seu,
+seu_singler$singler[[1]]$SingleR.single.main$labels,
+                                 col.name = "Immgen_annot_single_main")
+
+seu <- AddMetaData(seu,
+seu_singler$singler[[2]]$SingleR.single.main$labels,
+                                 col.name = "MouseRNAseq_single_main")
+
+seu <- AddMetaData(seu,
+seu_singler$singler[[2]]$SingleR.single$labels,
+                                 col.name = "MouseRNAseq_single")
+```
+
+We can see that according to SingleR annotations, some cells are probably contaminating B cells or monocytes. These cells will be removed in the next step.
+
+```{r fig.width = 8, fig.height = 3}
+DimPlot(seu, group.by = "MouseRNAseq_single_main") +
+DimPlot(seu, group.by = "Immgen_annot_single_main")
+```
+
+
+```{r fig.width = 17, fig.height = 4.5}
+DimPlot(seu, group.by = "Immgen_annot_single")
+```
+
+We can see that cluster 5 has low nCount_RNA, nFeature_RNA, high mt %, low ribo %, suggesting that these are dead or dying (low quality) cells.
+
+```{r fig.width = 16, fig.height = 3}
+DimPlot(seu, label = T) +
+VlnPlot(seu, features = c("nCount_RNA","nFeature_RNA","percent.mt","percent.rt"), ncol = 4) + 
+  plot_layout(widths = c(1, 4))
+```
+
+### Remove contaminating and low quality cells
+
+Removing clusters:
+
+- Cluster 5 = low nCount_RNA, nFeature_RNA, high mt %, low ribo %
+    
+Removing cells:
+
+- Mt percentage, filtration of cells with more than 10 %
+- Mouse RNAseq annotation other than T cells, NK cells
+  
+```{r}
+seu_filt <- subset(seu, percent.mt < 10 & seurat_clusters !=5 & MouseRNAseq_single %in% c("T cells", "NK cells"))
+  seu_filt <- ScaleData(seu_filt, verbose = FALSE)
+  seu_filt <- FindVariableFeatures(seu_filt, nfeatures = 1000, verbose = FALSE)
+  seu_filt <- RunPCA(seu_filt, npcs = 12, verbose = FALSE)
+  seu_filt <- RunUMAP(seu_filt, reduction = "pca", dims = 1:12)
+  seu_filt <- FindNeighbors(seu_filt, dims = 1:12)
+  seu_filt <- FindClusters(seu_filt, resolution = 0.3)
+```
+
+After filtering and re-clustering, we keep only high quality cells.
+
+```{r fig.width = 16, fig.height = 3}
+DimPlot(seu_filt, label = T) +
+VlnPlot(seu_filt, features = c("nCount_RNA","nFeature_RNA", "percent.mt","percent.rt"), ncol = 4) + 
+  plot_layout(widths = c(1, 4))
+```
+  
+# Old mice
+
+## Loading and cleaning data from old mice
+
+The initial file `E02_BOB6_data_init.rds` was generated in [Part 1] and can be downloaded on Zenodo [link]. 
+
+```{r fig.width = 7.5, fig.height = 3}
+# Set path to dataset E02_BOB6_data_init.rds and load the data
+
+path_old <- "datav02/init/E02_BOB6_data_init.rds"
+seu_old <- readRDS(path_old)
+```
+
+We will filter out mitochondrial genes, genes encoding for ribosomal proteins, and genes encoding for TCR alpha and beta chains. 
+
+```{r fig.width = 7.5, fig.height = 3}
+# Remove mitochondrial, ribosomal, TRAV, TRBV and unannotated genes: blood young B6
+
+seu_old_counts <- seu_old[["RNA"]]@counts
+seu_old_counts_old <- seu_old[["RNA"]]@counts
+seu_old_annots <- seu_old@meta.data
+print(paste("Nrows before filtering genes:    ",nrow(seu_old)))
+
+seu_old_counts <- seu_old[!(grepl('Trav', rownames(seu_old)) |
+          grepl('Trbv', rownames(seu_old)) |
+          grepl('mt-', rownames(seu_old)) |
+            grepl('Rpl', rownames(seu_old)) |
+          grepl('Rps', rownames(seu_old)) |
+          grepl('MGP-', rownames(seu_old))),]
+
+print(paste("Nrows after filtering genes:    ",nrow(seu_old_counts)))
+
+# Create seu_oldrat object with filtered genes
+
+seu_old <- CreateSeuratObject(counts = seu_old_counts[["RNA"]]@counts, project = "seu_old", min.cells = 3, min.features = 200, meta.data = seu_old_annots)
+
+# Process the blood young B6 dataset
+
+seu_old <- NormalizeData(object = seu_old)
+seu_old <- ScaleData(seu_old, verbose = FALSE)
+seu_old <- FindVariableFeatures(seu_old, selection.method = "vst", nfeatures = 1000)
+seu_old <- RunPCA(seu_old, npcs = 20, verbose = FALSE)
+seu_old <- RunUMAP(seu_old, reduction = "pca", dims = 1:20)
+seu_old <- FindNeighbors(seu_old, dims = 1:20)
+seu_old <- FindClusters(seu_old, resolution = 0.6)
+```
+
+```{r fig.width = 7.5, fig.height = 3}
+# Annotate cell types using SingleR, version ‘1.0.1’
+
+counts_old <- GetAssayData(seu_old[["RNA"]])
+seu_old_singler <- CreateSinglerObject(counts=counts_old,
+  project.name= "B6", # choose
+  min.genes = 200, # ignore cells with fewer than 200 transcripts
+  technology = "10x", # choose
+  species = "Mouse",
+  citation = "Paprckova et al. 2022", # choose
+  normalize.gene.length = FALSE,        # needed for full-length platforms (e.g. smartseq)
+  variable.genes = "de",  # see vignette
+  fine.tune = FALSE, # TRUE would take very long
+  reduce.file.size = TRUE, # leave out less-often used fields 
+  do.signatures = FALSE,
+  do.main.types = TRUE,
+  numCores = 4)
+
+## Summary of main cell types
+
+seu_old <- AddMetaData(seu_old,
+seu_old_singler$singler[[1]]$SingleR.single$labels,
+                                 col.name = "Immgen_annot_single")
+
+seu_old <- AddMetaData(seu_old,
+seu_old_singler$singler[[1]]$SingleR.single.main$labels,
+                                 col.name = "Immgen_annot_single_main")
+
+seu_old <- AddMetaData(seu_old,
+seu_old_singler$singler[[2]]$SingleR.single.main$labels,
+                                 col.name = "MouseRNAseq_single_main")
+
+seu_old <- AddMetaData(seu_old,
+seu_old_singler$singler[[2]]$SingleR.single$labels,
+                                 col.name = "MouseRNAseq_single")
+```
+
+We can see that according to SingleR annotations, some cells are probably contaminating B cells or monocytes. These cells will be removed in the next step.
+
+```{r fig.width = 8, fig.height = 3}
+DimPlot(seu_old, group.by = "MouseRNAseq_single_main") +
+DimPlot(seu_old, group.by = "Immgen_annot_single_main")
+```
+
+
+```{r fig.width = 17, fig.height = 4.5}
+DimPlot(seu_old, group.by = "Immgen_annot_single")
+```
+
+We can see that clusters 1 and 3 have low nCount_RNA, nFeature_RNA, high mt %, low ribo %, suggesting that these are dead or dying (low quality) cells.
+
+```{r fig.width = 16, fig.height = 3}
+DimPlot(seu_old, label = T) +
+VlnPlot(seu_old, features = c("nCount_RNA","nFeature_RNA","percent.mt","percent.rt"), ncol = 4) + 
+  plot_layout(widths = c(1, 4))
+```
+
+## Remove contaminating and low quality cells
+
+Removing clusters:
+
+* Clusters  1 and 3 = low nCount_RNA, nFeature_RNA, high mt %, low ribo %, no expression of CD3 or Trac
+
+Removing cells:
+
+* Mt filtration 10 %
+* Mouse RNAseq annotation other than T cells, NK cells
+
+```{r}
+seu_old_filt <- subset(seu_old, percent.mt < 10 & seurat_clusters %in% c(0,2,4:6) & MouseRNAseq_single %in% c("T cells", "NK cells"))
+
+
+seu_old_filt <- ScaleData(seu_old_filt, verbose = FALSE)
+seu_old_filt <- FindVariableFeatures(seu_old_filt, nfeatures = 1000, verbose = FALSE)
+seu_old_filt <- RunPCA(seu_old_filt, npcs = 12, verbose = FALSE)
+seu_old_filt <- RunUMAP(seu_old_filt, reduction = "pca", dims = 1:12)
+seu_old_filt <- FindNeighbors(seu_old_filt, dims = 1:12)
+seu_old_filt <- FindClusters(seu_old_filt, resolution = 0.3)
+
+```
+
+After filtering and re-clustering, we keep only high quality cells.
+
+```{r fig.width = 16, fig.height = 3}
+DimPlot(seu_old_filt, label = T) +
+VlnPlot(seu_old_filt, features = c("nCount_RNA","nFeature_RNA", "percent.mt","percent.rt"), ncol = 4) + 
+  plot_layout(widths = c(1, 4))
+```
+
+# Integration of young and old
+
+The next step is to integrate the two samples from young and aged mice together. We will use the filtered datasets that were produced in the previous section as input.
+
+```{r}
+
+seu_filt <- readRDS("data/filt/E02_BYB6_data_filt.rds")
+seu_old_filt <-  readRDS("data/filt/E02_BOB6_data_filt.rds")
+
+b6_blood <- merge(seu_old_filt, seu_filt)
+
+# split the dataset into a list of two seurat objects (stim and CTRL)
+b6_blood.list <- SplitObject(b6_blood, split.by = "orig.ident")
+
+
+# normalize and identify variable features for each dataset independently
+b6_blood.list <- lapply(X = b6_blood.list, FUN = function(x) {
+    x <- NormalizeData(x)
+    x <- FindVariableFeatures(x, selection.method = "vst", nfeatures = 500)
+})
+
+# select features that are repeatedly variable across datasets for integration
+features <- SelectIntegrationFeatures(object.list = b6_blood.list)
+b6_blood.anchors <- FindIntegrationAnchors(b6_blood.list, dims = 1:10)
+b6_blood.integrated <- IntegrateData(anchorset = b6_blood.anchors, dims = 1:10)
+DefaultAssay(b6_blood.integrated) <- "integrated"
+b6_blood.integrated <- ScaleData(b6_blood.integrated, verbose = FALSE)
+b6_blood.integrated <- FindVariableFeatures(b6_blood.integrated, selection.method = "vst", nfeatures = 500, 
+        verbose = FALSE)
+b6_blood.integrated <- RunPCA(b6_blood.integrated, npcs = 24, verbose = FALSE)
+b6_blood.integrated <- RunUMAP(b6_blood.integrated, reduction = "pca", dims = 1:24)
+b6_blood.integrated <- FindNeighbors(b6_blood.integrated, dims = 1:24)
+b6_blood.integrated <- FindClusters(b6_blood.integrated, resolution = 0.5)
+
+print(DimPlot(b6_blood.integrated, reduction = "umap", group.by = "seurat_clusters", label = TRUE) + ggtitle(i))
+#DimPlot(b6_blood.integrated, reduction = "umap", group.by = "orig.ident", label = TRUE)
+
+b6_blood.integrated$annot <- recode(b6_blood.integrated$seurat_clusters,
+                                    `0` = "Naive",
+                                    `1` = "AIMT",
+                                    `2` = "AIMT",
+                                    `3` = "Naive",
+                                    `4` = "AE",
+                                    `5` = "IRENA")
+```
+
+After integration, we obtained six clusters. All clusters are present in young and aged animals. 
+
+```{r fig.width = 8, fig.height = 3}
+
+DimPlot(b6_blood.integrated, reduction = "umap", group.by = "seurat_clusters", label = TRUE) + ggtitle("Integrated dataset") + (DimPlot(b6_blood.integrated, group.by = "orig.ident") + ggtitle("Original dataset"))
+```
+
+For subsequent analyses, we will combine clusters 0, 4 and 5 (Naive clusters) and 1 and 2 (AIMT clusters). 
+
+```{r  fig.width = 4, fig.height = 3}
+b6_blood.integrated$annot <- recode(b6_blood.integrated$seurat_clusters,
+                                    `0` = "Naive",
+                                    `1` = "AIMT",
+                                    `2` = "AIMT",
+                                    `3` = "Naive",
+                                    `4` = "AE",
+                                    `5` = "ISAGhi")
+DimPlot(b6_blood.integrated, group.by = "annot") + ggtitle("Annotations of T-cell clusters")
+```
+
+# Differentially expressed genes
+
+Markers are saved in a csv table markers.csv. Top 5 positive markers for each cluster are listed in a table below:
+
+```{r}
+markers_filt <- FindAllMarkers(b6_blood.integrated, assay = "RNA", logfc.threshold = log(1.5), slot = "counts", min.diff.pct = 0.05)
+
+df <- markers_filt %>% filter(avg_log2FC > 0) %>% group_by(cluster) %>%  slice_head(n = 5)
+
+kable(df, format = "html") %>%
+  kable_styling(full_width = F, font_size = 12,bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+
+# write.csv(markers_filt, file = "markers.csv", row.names = F)
+```
+
+# Figure 1
+
+
+## Fig 1A
+
+```{r fig.width = 4, fig.height = 3}
+## Main figure - reduced clusters
+DimPlot(b6_blood.integrated, pt.size = 0.5, label = F, group.by = "annot", cols = c("#69a9af", "#99cf7bff", "#c8ab3a", "#b96355" )) + ggtheme() + ggtitle("Fig 1A")
+```
+
+
+
+## Fig 1B
+
+```{r fig.width = 14, fig.height = 3}
+p1 <- FeaturePlot(b6_blood.integrated, reduction = "umap", features = c("Cd44"), ncol = 2, min.cutoff = 0, raster = T, max.cutoff = 3) + ggtheme()
+
+p2 <- FeaturePlot(b6_blood.integrated, reduction = "umap", features = c("Itga4"), ncol = 2, min.cutoff = 0, raster = T, max.cutoff = 3) + ggtheme()
+
+p3 <- FeaturePlot(b6_blood.integrated, reduction = "umap", features = c("Il2rb"), ncol = 2, min.cutoff = 0, raster = T, max.cutoff = 3) + ggtheme()
+
+p4 <- FeaturePlot(b6_blood.integrated, reduction = "umap", features = c("Isg15"), ncol = 2, min.cutoff = 0, raster = T, max.cutoff = 3) + ggtheme() 
+
+plot_grid(p1, p2, p3, p4, ncol = 4)
+```
+## Fig 1C
+
+```{r fig.width = 8, fig.height = 4}
+Idents(b6_blood.integrated) <- b6_blood.integrated$annot
+DotPlot(b6_blood.integrated, features = c("Tcf7", "Sell","Ccr7","Lef1", 
+                                          "Isg15", "Ifit1", "Ifit3", "Bst2", 
+                                         "Hopx", "Gzmm","Klrk1","Ly6c2","Il2rb",
+                                          "Cxcr3","Ccl5","Id2","Gzmk","Cd5",
+                                          "Eomes","Tbx21", "Prdm1","Cx3cr1","Klrg1",
+                                          "Gzma","Cd44",
+                                          "Itga4"), assay = "RNA", 
+        cluster.idents = TRUE,
+        cols = c("dodgerblue","indianred2"),
+        dot.scale = 3) +
+  theme(axis.text.x = element_text(angle = 60, hjust = 1, vjust = 1))
+
+```
+
+## Fig 1D
+
+```{r fig.width = 7, fig.height = 3}
+#GOLDRATH_NAIVE_VS_MEMORY_CD8_TCELL_DOWN
+#> Genes down-regulated in comparison of naive CD8 T cells versus memory CD8 T cells.
+naive_memory_down <- c("ABCB1", "ABHD5", "ACOT7", "ACY1", "AHNAK", "AIF1", "CRYBG1", "ANKH", "ANTXR2", "ANXA1", "ANXA2", "AQP9", "ARL6", "ART3", "ASAH1", "ATF6", "BAG3", "BCL2A1", "BCL2L2", "BHLHE40", "CAPG", "CAPN2", "CASP1", "CASP4", "YJU2B", "CCL4", "CCL5", "CCND3", "CCR2", "CCR5", "CD160", "CD22", "CD44", "CHCHD7", "CHPT1", "CISH", "CLDND1", "CPNE3", "CRTAM", "CST7", "CTNNA1", "CTSW", "CXCR3", "CYB5R4", "CYBB", "CYFIP1", "CYP4V2", "DAPK2", "DBNDD2", "DENND4C", "DENND5A", "DNAJC5", "DOCK5", "DSTN", "ECI1", "EEA1", "EI24", "ELL2", "EMP1", "ENPP1", "EOMES", "ERRFI1", "EVI2A", "EYA4", "F2R", "FASLG", "FCGR2B", "FCGRT", "FGL2", "FHIT", "GABARAPL2", "GATA3", "GCAT", "GCLM", "GGH", "GK", "GLRX", "GOLIM4", "GOLM1", "GPC1", "GPHN", "GSTO1", "GZMA", "GZMB", "GZMK", "GZMM", "HCFC1R1", "HIP1R", "HSD17B11", "ID2", "IER3", "IFITM10", "IFNG", "IL10RB", "IL15", "IL15RA", "IL18R1", "IL18RAP", "IRF8", "ITGAX", "ITGB1", "ITM2C", "KCNJ8", "KCTD12", "PALD1", "CIPC", "KLHL7", "KLRC1", "KLRG1", "KLRK1", "KRTCAP2", "LGALS1", "LGALS3", "LIMD1", "LITAF", "LPGAT1", "LPIN1", "MAP3K8", "MAPK12", "MAPRE2", "SLC25A53", "MCOLN2", "MDFIC", "MED10", "MGST3", "MS4A1", "MYADM", "MYL1", "MYO1F", "N4BP1", "NBEAL2", "NCKAP1", "NOTCH4", "NRP1", "ODC1", "OSTF1", "PBX3", "PGAM1", "PGLYRP1", "PHF13", "PLAT", "PLBD1", "PLCD1", "PLEKHA5", "PLEKHB2", "PLP2", "PLSCR1", "POLR1B", "POU6F1", "PPP3CC", "SLC66A3", "PRDM1", "PRF1", "PRKCA", "PRSS12", "PTPN13", "PTPN22", "RAB3D", "RASA4", "RECK", "RNASE4", "RNF138", "RPGR", "S100A10", "S100A13", "S100A4", "S100A6", "SAMHD1", "SEMA4A", "SEMA4F", "SERPINB6", "SERPINB9", "SKAP2", "SLC35E4", "SMYD1", "SNX10", "SOAT2", "SOCS2", "SOS2", "SSX2IP", "ST3GAL4", "ST3GAL6", "STARD10", "STX7", "TK1", "TKTL1", "TMEM141", "LDAF1", "TMEM37", "PIP4P2", "TNFRSF1B", "TRAF1", "TRAF3IP2", "TSPAN4", "TUSC2", "TXNDC5", "UNC119B", "VKORC1", "VMP1", "XIST")
+
+
+naive_memory_down2 <- convertHumanGeneList2(naive_memory_down)
+
+naive_memory_down_filt <- naive_memory_down2[which(naive_memory_down2 %in% rownames(b6_blood.integrated[["RNA"]]))]
+
+b6_blood.integrated <- AddModuleScore(
+  object = b6_blood.integrated,
+  features = list(c(naive_memory_down_filt)),
+  assay = "RNA",
+  name = 'Naive_memory_down_signature_'
+)
+
+
+(FeaturePlot(b6_blood.integrated, features = "Naive_memory_down_signature_1", min.cutoff = 0) + ggtheme() + ggtitle("Memory signature")) +
+(VlnPlot(b6_blood.integrated, features = "Naive_memory_down_signature_1", group.by = "annot", pt.size = 0, cols = c("#69a9af","#99cf7bff","#c8ab3a","#b96355" )) + ggtitle("") + ggtheme()) + plot_layout(ncol = 2)
+
+```
+
+## Fig 1E
+
+```{r fig.width = 7, fig.height = 3}
+# STANDARD_NAME	GOLDRATH_NAIVE_VS_EFF_CD8_TCELL_DN
+# SYSTEMATIC_NAME	M3036
+# DESCRIPTION_BRIEF	Genes down-regulated in comparison of naïve CD8 T cells versus effector CD8 T cells.
+
+
+naive_eff_down <- c("ACOT7", "ADAM8", "ANLN", "ANXA1", "ANXA2", "ANXA4", "ARHGAP21", "ASF1B", "ASPM", "ATP5IF1", "AURKA", "AURKB", "BATF3", "BCL2A1", "BHLHE40", "BIRC5", "BMP2K", "BRCA1", "BUB1", "VPS51", "CMC2", "C3", "HPF1", "C6orf89", "CA1", "CA2", "CAPG", "CAPN2", "CARHSP1", "CASP3", "CCL4", "CCNA2", "CCNB2", "CCNF", "CCR2", "CCR5", "CD244", "CD48", "CD99", "CDC25C", "CDC45", "CDC6", "CDCA3", "CDCA5", "CDCA8", "CDK1", "CDK2AP1", "CDKN2C", "CDKN3", "CENPA", "CHAF1A", "CHEK1", "CISD1", "CISH", "CKS1B", "CKS2", "CRMP1", "CYFIP1", "DHFR", "DLGAP5", "DOCK5", "DSTN", "DTL", "E2F8", "ECT2", "EEA1", "EFHD2", "ELL2", "EMP1", "EMP3", "ERRFI1", "EZH2", "F2RL3", "FASLG", "FCER1G", "FGL2", "FHL2", "GALNT3", "GCAT", "GEM", "GLRX", "GMNN", "GNG10", "GNPDA1", "GZMA", "GZMB", "GZMK", "GZMM", "H1-0", "H2AX", "H2AZ1", "H1-2", "HOPX", "IFI30", "IFITM3", "IFNG", "JCHAIN", "IGKC", "IGLC7", "INCENP", "IRF4", "IRF8", "ITGAX", "ITGB1", "PCLAF", "KIF11", "KIF20A", "KIF22", "KIF2C", "KIF4A", "KIFC1", "KLRG1", "KLRK1", "KRTCAP2", "LAG3", "LGALS1", "LGALS3", "LIG1", "LITAF", "LPIN1", "LYN", "MAD2L1", "MAPK6", "MAPRE2", "MCM10", "MCM5", "MDFIC", "MIS18BP1", "MKI67", "MS4A1", "MT1E", "MT2A", "MTM1", "MTMR9", "MYADM", "MYO1F", "NAPSA", "NCAPH", "NEK2", "NPPA", "NRP1", "NUDT4", "NUSAP1", "ODC1", "PCNA", "PDCD1", "PERP", "PGAM1", "PLD4", "PLIN2", "PLK4", "PLP2", "PLSCR1", "POLA1", "PRC1", "PRDM1", "PRDX4", "PRF1", "PRIM1", "PRIM2", "RAB11A", "RAD51", "REEP5", "RFC5", "RHD", "RHOQ", "RNASEH2B", "ROM1", "RRM1", "S100A10", "S100A4", "S100A6", "SCPEP1", "SERINC3", "SERPINB6", "SERPINB9", "SH3BGRL", "SKAP2", "SNX10", "SOCS2", "STARD10", "STMN1", "SYPL1", "TACC3", "TBL2", "TCF19", "TK1", "TKTL1", "TMEM14C", "TMEM37", "TNFRSF9", "TOP2A", "TPI1", "TTK", "TXN", "TYMS", "UBE2T", "UBL3", "UNC119", "VCL")
+
+
+naive_eff_down2 <- convertHumanGeneList2(naive_eff_down)
+
+naive_eff_down_filt <- naive_eff_down2[which(naive_eff_down2 %in% rownames(b6_blood.integrated[["RNA"]]))]
+
+
+
+b6_blood.integrated <- AddModuleScore(
+  object = b6_blood.integrated,
+  features = list(c(naive_eff_down_filt)),
+  assay = "RNA",
+  name = 'Naive_eff_down_signature_'
+)
+
+(FeaturePlot(b6_blood.integrated, features = "Naive_eff_down_signature_1", min.cutoff = 0, max.cutoff = 0.4) + ggtheme() + ggtitle("Effector signature")) +
+(VlnPlot(b6_blood.integrated, features = "Naive_eff_down_signature_1", group.by = "annot", pt.size = 0, cols = c("#69a9af","#99cf7bff","#c8ab3a","#b96355")) + ggtitle("") + ggtheme()) + plot_layout(ncol = 2)
+```
+
+## Fig 1F
+
+```{r fig.width = 7, fig.height = 3}
+# Interferon GO:0060338
+# regulation of type I interferon-mediated signaling pathway
+
+interferon <-  c("Oas1g", "Mmp12", "Ube2k", "Usp29", "Zbp1", "Dcst1", "Usp27x", "Irf7", "Ythdf3", "Irf3", "Trim56", "Mavs", "Trim6", "Trim41", "Oas1a", "Oas1f", "Oas1h", "Oas3", "Ptpn2", "Ttll12", "Oas1d", "Rnf185", "Mul1", "Trex1", "Sting1", "Ikbke", "Tbk1", "Stat2", "Isg15", "Fadd", "Mettl3", "Samhd1", "Cdc37", "Cactin", "Ythdf2", "Wnt5a", "Cnot7", "Oas1c", "Lsm14a", "Adar", "Nlrc5", "Oas1e")
+
+
+interferon_filt <- interferon[which(interferon %in% rownames(b6_blood.integrated[["RNA"]]))]
+
+b6_blood.integrated <- AddModuleScore(
+  object = b6_blood.integrated,
+  features = list(c(interferon_filt)),
+  assay = "RNA",
+  name = 'Interferon_signature_'
+)
+
+(FeaturePlot(b6_blood.integrated, features = "Interferon_signature_1", raster = T, ncol = 2, min.cutoff = 0, max.cutoff = 0.25) + ggtheme() + ggtitle("Type I interferon signature")) +
+(VlnPlot(b6_blood.integrated, features = "Interferon_signature_1", group.by = "annot", pt.size = 0, cols = c("#69a9af","#99cf7bff","#c8ab3a","#b96355")) + ggtitle("") + ggtheme()) + plot_layout(ncol = 2)
+```
+
+
+## Fig 1G
+
+```{r fig.width = 7, fig.height = 3}
+sig_genes_cl15 <- c("IFIT1", "RSAD2", "IFIT3", "IFI44L", "MX1", "IFI6", "OAS1", "CMPK2", "ISG15", "OAS3", "IFIT2", "HERC5", "USP18", "MX2", "IFI44", "LAMP3", "XAF1", "EPSTI1", "EIF2AK2", "PLSCR1", "STAT1", "LY6E", "LGALS9", "SAMD9L", "IFI35", "IRF7", "ISG20", "OAS2", "PARP9", "GBP1", "IFITM1", "TRIM22", "OASL", "SAMD9", "BST2", "IFIH1", "UBE2L6", "DDX60", "LAP3", "DDX60L", "DDX58", "HELZ2", "CD38", "PARP14", "HERC6", "PNPT1", "STAT2", "HSH2D", "RTP4", "MT2A", "IFIT5", "NT5C3A", "RNF213", "ZBP1", "TNFSF10", "LAG3", "SP100", "TYMP", "IFI16", "C19orf66", "DRAP1", "SP110", "SPATS2L", "GBP4", "PPM1K", "IFI27", "ADAR", "DTX3L", "PARP12", "PARP10", "PHF11", "IFITM3", "PSMB9", "TAP1", "AKAP2", "SAT1", "B2M", "NMI", "CHMP5", "IFITM2", "PML", "GBP5", "ZNFX1", "ETV7", "APOL6", "CARD16", "NUB1", "HAPLN3", "TRANK1", "TRIM25", "CNP", "C5orf56", "RBCK1", "TMEM140", "FBXO6", "DHX58", "CHST12", "TRAFD1", "RARRES3", "XRN1", "PSME2", "CASP1", "PSMB8", "BCL2L14", "SHISA5", "ODF3B", "SLFN5", "SP140", "HLA-A", "TRIM21", "CCR1", "N4BP1", "HLA-C", "HLA-B", "SMCHD1", "NAPA", "HLA-E", "MOV10", "MYL12A", "NEXN", "GBP2", "ALOX5AP", "CD164", "TMEM123", "ENDOD1", "TMSB10", "WARS", "MYD88", "SLC38A5", "TRIM14", "HELB", "PRKD2", "PSME1", "RASGRP3", "TRIM38", "APOL1", "ODF2L", "DYNLT1", "TMSB4X", "TANK", "ECE1", "APOL2", "TDRD7", "PSMB10", "AZI2", "COX5A", "PI4K2B", "USP15", "IRF9", "PTMS", "CMTR1", "CD74", "GNG5", "ELF1", "PPP1CC", "RGS1", "EHD4", "LGALS3BP", "SAMHD1", "GSDMD", "LPIN2", "CD48", "SLFN12L", "GIMAP4", "IDH2", "GBP3", "TRIM5", "OGFR", "EVL", "PSMA5", "WIPF1", "C4orf3", "STOM", "HM13", "TBC1D1", "SLA2", "FCHSD2", "TAPBP", "SNX6", "ZCCHC2", "HLA-DPA1", "TNK2", "IRF2", "KPNB1", "TMX1", "COTL1", "CALCOCO2", "PRF1", "C1GALT1", "TNFSF13B", "SCLT1", "APOBEC3G", "CAPN2", "CD2", "TRIM69", "GPBP1", "MCOLN2", "GPR155", "UTRN", "CCDC85B", "CLEC2B", "ERAP2", "CTSS", "PCGF5", "MVP", "GZMB", "CD47", "TRIM56", "YEATS2", "BAK1", "GZMA", "DNAJA1", "IRF1", "PGAP1", "CASP7", "UBC", "VAMP5", "FANCA", "IL15RA", "PARP8", "KLHDC7B", "TRIM34", "AIM2", "DAPP1", "TAP2", "GIMAP7", "BRCA2", "L3HYPDH", "APOBEC3H", "LYSMD2", "CARD17", "GALM", "RAC2", "SUSD3", "SUB1", "MTHFD2", "IFI30", "MLKL", "BAG1", "S100A11", "GPR180", "SCARB2", "H3F3B", "CNDP2", "SCO2", "PARP11", "USP30-AS1", "HLA-DRA", "GSTK1", "ARHGEF3", "ANKFY1", "SOCS1", "SETX", "FASLG", "CXCL13", "NLRC5", "DEGS1", "CAPG", "PRR5", "TRIM26", "DOPEY1", "HLA-DRB1", "JAK2", "PSMA6", "CD68", "UBA7", "EXOC2", "GIMAP2", "CSF1", "ACP5", "MRPL17", "TDRD3", "TRADD", "L3MBTL3", "CFLAR", "PMAIP1", "HSPA1A", "HAVCR2", "CTSC", "CLDND1", "OPTN", "GPR171", "ZC3HAV1", "MICB", "CCL5", "TGM1", "PSMA3", "WDFY1", "CCR5", "TIMD4", "OTOF", "RNF149", "LNPEP", "CASP4", "STX17", "CLEC2D", "NDC80", "TMEM62", "SERPINB1", "PTK2B", "TMEM109", "MYL12B", "RBPJ", "SUPT3H", "PYURF", "PDCD1", "DNPEP", "CXCR6", "CD69", "TMEM50A", "DERL1", "UVRAG", "MZB1", "ME2", "TTC21A", "MCL1", "LMNB1", "GTPBP1", "AFF1", "ITGA1", "ARPC3", "LGALS8", "ANKIB1", "HLA-DPB1", "PSMA2", "RBX1", "CLIC3")
+
+b6_blood.integrated <- AddModuleScore(
+  object = b6_blood.integrated,
+  features = list(c(sig_genes_cl15)),
+  search = T,
+  assay = "RNA",
+  name = 'PanCancerCD8Tcell_Cluster15_signature_'
+  
+)
+
+(FeaturePlot(b6_blood.integrated, features = "PanCancerCD8Tcell_Cluster15_signature_1", raster = T, ncol = 2, min.cutoff = 0.2, max.cutoff = 0.5) + ggtheme() + ggtitle("CD8+ ISAG+ signature")) +
+(VlnPlot(b6_blood.integrated, features = "PanCancerCD8Tcell_Cluster15_signature_1", group.by = "annot", pt.size = 0, cols = c("#69a9af","#99cf7bff","#c8ab3a","#b96355")) + ggtitle("") + ggtheme()) + plot_layout(ncol = 2)
+```
+
+
+## Fig 1H
+
+```{r fig.width = 7, fig.height = 3}
+CD5lo_CD5hiLy6Cpos_g <-c("Ly6c1", "Cxcr3", "A430093F15Rik", "LOC268288", "Plac8", "Ccl5", "A530021J07Rik",
+"Pde2a", "Xcl1", "Pglyrp1", "Anxa2", "Reck", "Dapl1", "LOC675594",
+ "Tbx21", "F2rl1", "LOC624610", "Eomes", "Endod1", "Zfp296", "Prss12", 
+ "3110013H01Rik", "Aim1", "Plekhg3", "C230043G09Rik", "A630064F15Rik", "2210411K11Rik", "Pdlim7", 
+ "Xdh", "Gsto1", "scl0004175.1_57", "D8Ertd82e", "Gsg2", "Acsbg1", "Serpina3g",
+ "6330509M05Rik", "Slpi", "Car11", "Adamtsl4", "Hopx", "Chn2", "LOC630146",
+ "X99384" )
+
+
+b6_blood.integrated <- AddModuleScore(
+  object = b6_blood.integrated,
+  features = list(c(CD5lo_CD5hiLy6Cpos_g)),
+  search = T,
+  assay = "RNA",
+  name = 'JunJu_CD5lo_CD5hiLy6Cpos_signature_'
+  
+)
+
+(FeaturePlot(b6_blood.integrated, features = "JunJu_CD5lo_CD5hiLy6Cpos_signature_1", raster = T, ncol = 2, min.cutoff = 0) + ggtheme() + ggtitle("CD5hi Ly6C+ signature")) +
+(VlnPlot(b6_blood.integrated, features = "JunJu_CD5lo_CD5hiLy6Cpos_signature_1", group.by = "annot", pt.size = 0, cols = c("#69a9af","#99cf7bff","#c8ab3a","#b96355")) + ggtitle("") + ggtheme()) + plot_layout(ncol = 2)
+```
+
+## Fig 1I
+
+Plots show the percentage of cells in each cluster for young and old animals, respectively. The plots were combined manually. 
+
+```{r fig.width = 6, fig.height = 3}
+
+df4 <- b6_blood.integrated@meta.data %>% group_by(orig.ident, annot) %>% 
+  summarise(n = n()) %>%
+  mutate(freq = n / sum(n)) 
+
+
+# Stacked barplot young
+p11 <- df4 %>%
+  filter(orig.ident == "E02_BYB6") %>% 
+     ggplot(aes(fill=orig.ident, y=freq*100, x=factor(annot, levels = c("Naive","AIMT","ISAGhi","AE")))) + 
+    geom_bar(position="identity", stat="identity", fill = "black") + 
+    theme_classic() + ggtheme() + xlab("") + ylab("") + theme(axis.title = element_text(colour = "black"), 
+                                                              axis.text = element_text(colour = "black"),
+                                                              axis.ticks = element_line(colour = "black"),
+                                                              axis.text.x = element_text(angle = 60, vjust = 0.5)) + ylim(c(0,100))
+
+# Stacked barplot old
+p12 <- df4 %>%
+  filter(orig.ident == "E02_BOB6") %>% 
+    ggplot(aes(fill=orig.ident, y=freq*100, x=factor(annot, levels = c("Naive","AIMT","ISAGhi","AE")))) + 
+    geom_bar(position="identity", stat="identity", fill = "gray") + 
+    theme_classic() + ggtheme() + xlab("") + ylab("") + theme(axis.title = element_text(colour = "black"), 
+                                                              axis.text = element_text(colour = "black"),
+                                                              axis.ticks = element_line(colour = "black"),
+                                                              axis.text.x = element_text(angle = 60, vjust = 0.5)) + ylim(c(0,100))
+p11 + p12
+```
+
+## Fig 1J
+
+```{r fig.width = 8, fig.height = 7}
+
+# Create a data frame with Seurat metadata
+metadata_df <- b6_blood.integrated@meta.data
+rownames(metadata_df) <- colnames(b6_blood.integrated)
+
+# Add the column for clone info
+metadata_df <- metadata_df %>% mutate(
+  clone_nt = paste(cdr3_B_nt,cdr3_A1_nt,cdr3_A2_nt),
+  clone_aa = paste("CDR3b",cdr3_B,"CDR3a",cdr3_A1))
+
+# Prepare a column for counting the clone abundance
+metadata_df$test <- 0
+metadata_df <- metadata_df %>% group_by(test, clone_aa) %>% mutate(clone_abundance = as.numeric(n()))
+
+# Change NA values to "1" for the purpose of log scaling and plotting
+metadata_df <- as.data.frame(metadata_df %>% 
+                  mutate(
+                    clone_abundance_wo_expanded = as.numeric(
+                      ifelse(clone_abundance %in% c(573, 291, 267), 1,clone_abundance)),
+                    clone_abundance = as.numeric(
+                      ifelse(clone_abundance %in% c(291), 1,clone_abundance))) %>%
+                  mutate(log10_clone_abundance = log(clone_abundance, base = 10),
+                      log2_clone_abundance_wo_expanded = log(clone_abundance_wo_expanded, base = 2)))
+
+# Add the clone count info to the Seurat object
+rownames(metadata_df) <- colnames(b6_blood.integrated)
+b6_blood.integrated@meta.data <- metadata_df
+rownames(b6_blood.integrated@meta.data) <- colnames(b6_blood.integrated)
+
+
+# Log10 clone abundance
+p13 <- FeaturePlot(b6_blood.integrated, reduction = "umap", features = "log10_clone_abundance")  + ggtitle("Log10 clone abundance", subtitle = "With one overexpanded clone") + ggtheme()
+
+# Clone abundance without expanded
+p14 <- FeaturePlot(b6_blood.integrated, reduction = "umap", features = "log2_clone_abundance_wo_expanded") + ggtheme() + 
+  ggtitle("Log2 clone abundance", subtitle = "Overexpanded clone removed") + ggtheme()
+
+## With expanded clone
+metadata_df <- metadata_df %>%
+  mutate( clone_abundance_group = case_when(clone_abundance>249 ~ ">249",
+                                            clone_abundance>49&clone_abundance<=249 ~ "50-249",
+                                            clone_abundance>9&clone_abundance<=49 ~ "10-49",
+                                            clone_abundance>1&clone_abundance<=9 ~ "2-9",
+                                            clone_abundance==1 ~ "1",
+                                            TRUE ~ "1"
+                                            ))
+## Bar plot 
+p15 <- metadata_df %>% 
+  ggplot(aes(x = factor(annot, levels = c("Naive","ISAGhi","AIMT","AE")))) + 
+  geom_bar(aes(fill = factor(clone_abundance_group, levels = c("1","2-9","10-49","50-249",">249"))), position = "fill") +   scale_fill_brewer(palette = "Blues") + xlab("Frequency")+ylab("") + theme_classic() + theme(plot.title = element_text(hjust = 0.5), legend.position="right", panel.border = element_blank(), legend.title = element_blank()) + ggtitle("Clone abundance in clusters", subtitle = "With one overexpanded clone") + ggtheme()
+
+
+
+## Without expanded clone
+metadata_df <- metadata_df %>%
+  mutate( clone_abundance_group_wo_expanded = case_when(clone_abundance_wo_expanded>10 ~ ">10",
+                                            clone_abundance_wo_expanded>2&clone_abundance_wo_expanded<=10 ~ "2-10",
+                                            clone_abundance_wo_expanded==1 ~ "1",
+                                            TRUE ~ "1"))
+
+### Axis up to 30%
+p16 <-  metadata_df %>% 
+  ggplot(aes(x = factor(annot, levels = c("Naive","ISAGhi","AIMT","AE")))) + 
+  geom_bar(aes(fill = factor(clone_abundance_group_wo_expanded, levels = c("1","2-10",">10"))), position = "fill") + 
+  scale_fill_manual(values = c("white","grey","black")) + 
+  xlab("Frequency") +
+  ylab("") + 
+  theme_classic() + 
+  theme(plot.title = element_text(hjust = 0.5), legend.position="right", panel.border = element_blank(), legend.title = element_blank()) + 
+  ggtitle("Clone abundance in clusters", subtitle = "Overexpanded clone removed") + 
+   ylim(c(0,0.3)) +
+  ggtheme()
+ 
+p13 + p15 | p14 + p16
+```
+
+# Supplementary figure 1
+
+## Fig S1A
+
+```{r fig.width = 4, fig.height = 3}
+
+## Supplement / all clusters
+DimPlot(b6_blood.integrated, pt.size = 0.5)  + ggtitle("Fig S1A") + ggtheme()
+
+```
+
+## Fig S1B
+
+```{r  fig.width = 4, fig.height = 3}
+
+# Filter markers of cluster 5 = ISAGhi
+markers_cluster5_pos <- markers_filt %>% filter(cluster == 5 & avg_log2FC > 0)
+
+# Convert gene names to EntrezIDs
+gene_convert <- select(org.Mm.eg.db, 
+       keys = c(markers_cluster5_pos$gene),
+       columns = c("ENTREZID", "SYMBOL"),
+       keytype = "SYMBOL")
+
+# Find enriched pathways
+x <- enrichPathway(gene=gene_convert$ENTREZID, organism = "mouse", pvalueCutoff=0.05, readable=T)
+df <- as.data.frame(x)
+x2 <- enrichplot::pairwise_termsim(x) 
+pp2 <- barplot(x2) + ggtitle("Cluster 5")
+
+# Plot the result
+pp2 + theme_classic() + ggtheme() + scale_x_continuous(breaks = c(0,2,4,6,8,10)) + xlab("Enriched genes")
+
+```
+
+## Fig S1C
+
+```{r  fig.width = 4.5, fig.height = 3}
+b6_blood.integrated$age <- if_else(b6_blood.integrated$orig.ident == "E02_BOB6","Old","Young")
+DimPlot(b6_blood.integrated, pt.size = 0.5, group.by = "age") + ggtheme() + ggtitle("UMAP by age of animals") 
+```
+
+## Fig S1D
+
+```{r  fig.width = 4.5, fig.height = 3}
+p14 + ggtheme()
+```
+
+# SessionInfo
+
+```{r}
+sessionInfo()
+```
+
