@@ -67,6 +67,8 @@ In Part 2, we describe:
 * Generation of figures for the manuscript
 
 Please download and open the file `part_2_Final_analysis.html` to see all the final figures included in the manuscript with the code to produce them. After the file is downloaded and saved, it can be viewed easily in any web browser. Please note that it is crucial to download the file to your laptop first and open it from there. You will only see html code if you try to look at it directly from GitHub. 
+
+
 ---
 
 Contact:  
