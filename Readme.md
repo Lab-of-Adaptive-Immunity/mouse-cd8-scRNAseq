@@ -11,7 +11,7 @@
 This directory contains files that allow you to reproduce the scRNA seq results from Paprckova et al. manuscript, titled:  
 ### Self-reactivity of CD8 T-cell clones determines their differentiation status rather than their responsiveness in infections  
 
-Link to paper: COMING SOON!  
+Link to paper: [Paprckova et al., Frontiers in Immunology](https://www.frontiersin.org/journals/immunology/articles/10.3389/fimmu.2022.1009198/full)
 
 Link to data: [GEO208795](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE208795)  
 
